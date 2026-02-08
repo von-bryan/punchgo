@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:intl/intl.dart';
-import 'dart:io';
 import '../main.dart';
 import '../models/employee.dart';
 import '../models/login_record.dart';
@@ -26,9 +25,7 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
   bool _showSuccess = false;
   bool _isConfirmed = false;
   Employee? _currentUser;
-  String? _enrolledPhotoUrl;
   // Debug info
-  double? _lastSimilarity;
   Size? _lastFaceBoxSize;
   // Relative face box position (percent of image) and size
   double? _lastFaceBoxCenterX;
@@ -37,9 +34,9 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
   double? _lastFaceBoxHeightPct;
   bool _isMatching = false; // New variable to track matching state
   // Matching parameters
-  final double _matchThreshold = 60.0; // primary acceptance threshold (easier)
-  final double _matchTolerance = 10.0; // accept within +/- this value
-  final double _autoStopThreshold = 85.0; // auto-stop detection at this confidence
+  final double _matchThreshold = 85.0; // primary acceptance threshold - VERY STRICT (phone-like)
+  final double _matchTolerance = 5.0; // accept within +/- this value
+  final double _autoStopThreshold = 90.0; // auto-stop detection at this confidence
   // Recent similarity history to allow small temporal variance matching
   final List<double> _recentSimilarities = [];
 
@@ -51,54 +48,101 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
   }
 
   Future<void> _loadCurrentUser() async {
-    final empId = await AuthService.getEmpId();
-    if (empId != null) {
-      // Get only the latest active enrolled face
-      final active =
-          await DatabaseHelper.instance.getActiveFaceEnrollment(empId);
-      if (active != null && active['face_descriptors'] != null) {
-        // Handle Blob, Uint8List, or String for face_descriptors
-        var descriptors = active['face_descriptors'];
-        if (descriptors is! String) {
-          try {
-            print('[DEBUG] Blob runtimeType: ' +
-                descriptors.runtimeType.toString());
-            print('[DEBUG] Blob toString: ' + descriptors.toString());
-            // Ensure Blob's toString() is a valid JSON array string
-            var descStr = descriptors.toString();
-            if (descStr.startsWith('[')) {
-              descriptors = descStr;
-            } else {
-              descriptors = '[${descStr}]';
+    try {
+      final empId = await AuthService.getEmpId();
+      if (empId == null) {
+        _currentUser = null;
+        return;
+      }
+
+      // Try to get LATEST active enrollment only
+      final enrollment = await DatabaseHelper.instance.getActiveEnrollment(empId);
+      if (enrollment == null) {
+        _currentUser = null;
+        print('⚠️ No active enrollment found');
+        return;
+      }
+
+      final enrollmentId = enrollment['face_id'];
+      if (enrollmentId == null) {
+        _currentUser = null;
+        print('⚠️ Enrollment ID is null');
+        return;
+      }
+      
+      print('[TimeInOut] Using enrollment ID: $enrollmentId (completed: ${enrollment['is_complete']}, samples: ${enrollment['sample_count']})');
+
+      // Try to get samples from new face_samples table
+      try {
+        final samples = await DatabaseHelper.instance.getEnrollmentSamples(enrollmentId);
+        
+        if (samples.isNotEmpty) {
+          // New system with multiple samples
+          List<String> descriptorsList = [];
+          for (int i = 0; i < samples.length; i++) {
+            final sample = samples[i];
+            
+            final desc = sample['face_descriptors'];
+            
+            if (desc != null && desc is String && desc.isNotEmpty) {
+              descriptorsList.add(desc);
+            } else if (desc != null) {
+              String descStr = desc.toString();
+              if (descStr.isNotEmpty && descStr != 'null') {
+                descriptorsList.add(descStr);
+              }
             }
-          } catch (e) {
-            print('[ERROR] Failed to convert face_descriptors to String: $e');
-            descriptors = '';
+          }
+
+          if (descriptorsList.isNotEmpty) {
+            _currentUser = Employee(
+              empId: empId,
+              surname: '',
+              firstName: '',
+              faceDescriptors: descriptorsList.join('|'),
+            );
+            print('✅ Loaded ${descriptorsList.length} face samples for matching');
+            return;
           }
         }
-        _currentUser = Employee(
-          empId: empId,
-          surname: '',
-          firstName: '',
-          faceDescriptors: descriptors,
-        );
-        // Set the enrolled photo URL if available
-        print('[DEBUG] Enrolled photo_path: ${active['photo_path']}');
-        if (active['photo_path'] != null &&
-            active['photo_path'].toString().isNotEmpty) {
-          // If photo_path is a relative path, prepend your server URL if needed
-          _enrolledPhotoUrl = active['photo_path'];
-        } else {
-          _enrolledPhotoUrl = null;
-        }
-        print('Loaded current user with latest enrolled face.');
-      } else {
-        _currentUser = null;
-        _enrolledPhotoUrl = null;
-        print('No active enrolled face for current user.');
+      } catch (e) {
+        print('[ERROR] Error loading samples: $e');
       }
-    } else {
-      _enrolledPhotoUrl = null;
+
+      // Fallback: Old system with single descriptor in face_enrollments
+      var descriptors = enrollment['face_descriptors'];
+      
+      if (descriptors != null) {
+        String descStr = '';
+        if (descriptors is String) {
+          descStr = descriptors;
+        } else {
+          try {
+            descStr = descriptors.toString();
+          } catch (e) {
+            print('[ERROR] Failed to convert descriptors: $e');
+            descStr = '';
+          }
+        }
+
+        if (descStr.isNotEmpty && descStr != 'null') {
+          _currentUser = Employee(
+            empId: empId,
+            surname: '',
+            firstName: '',
+            faceDescriptors: descStr,
+          );
+          print('✅ Loaded legacy face enrollment for matching');
+          return;
+        }
+      }
+
+      // No valid enrollment found
+      _currentUser = null;
+      print('⚠️ No valid face enrollment found');
+    } catch (e) {
+      print('[ERROR] _loadCurrentUser exception: $e');
+      _currentUser = null;
     }
   }
 
@@ -232,7 +276,6 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
               setState(() {
                 _statusMessage = 'Face too small or unclear';
                 _recognizedEmployee = null;
-                _lastSimilarity = null;
               });
             }
           }
@@ -242,7 +285,6 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
               _statusMessage = 'No face detected';
               _recognizedEmployee = null;
               _lastFaceBoxSize = null;
-              _lastSimilarity = null;
             });
           }
           // clear recent similarities when no face is present
@@ -258,10 +300,12 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
   }
 
   Future<void> _matchFace(String descriptors) async {
-    // Debug: print enrolled and detected descriptors
-    print('[DEBUG] Enrolled descriptors: ${_currentUser?.faceDescriptors}');
-    print('[DEBUG] Detected descriptors: $descriptors');
-
+    // STRICT: Validate that we have valid descriptors
+    if (descriptors.isEmpty) {
+      print('[ERROR] Descriptors are empty');
+      return;
+    }
+    
     if (_currentUser == null ||
         _currentUser?.faceDescriptors == null ||
         (_currentUser?.faceDescriptors ?? '').isEmpty) {
@@ -269,7 +313,6 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
         setState(() {
           _statusMessage =
               'No enrolled face found. Please enroll your face in the Profile tab.';
-          _lastSimilarity = null;
         });
       }
       print('[ERROR] No enrolled face descriptors found.');
@@ -278,12 +321,36 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
 
     double similarity = 0.0;
     try {
-      similarity = _faceService.compareFaces(
-        descriptors,
-        _currentUser?.faceDescriptors,
-      );
-      print('[TimeInOut] _matchFace: similarity=$similarity');
-      // record recent similarities
+      // Split multiple samples (separated by |)
+      final String enrolledDescStr = _currentUser?.faceDescriptors ?? '';
+      final List<String> enrolledSamples = enrolledDescStr
+        .split('|')
+        .where((s) => s.isNotEmpty)
+        .toList();
+
+      if (enrolledSamples.isEmpty) {
+        // Fallback for single sample
+        similarity = _faceService.compareFaces(descriptors, enrolledDescStr);
+      } else if (enrolledSamples.length == 1) {
+        // Single sample - normal comparison
+        similarity = _faceService.compareFaces(descriptors, enrolledSamples[0]);
+      } else {
+        // Multiple samples - use best match + bonus
+        similarity = _faceService.compareAgainstMultipleSamples(descriptors, enrolledSamples);
+      }
+      
+      if (similarity == 0.0) {
+        print('[ERROR] Comparison resulted in 0% - invalid descriptors or mismatch');
+        if (mounted) {
+          setState(() {
+            _statusMessage = 'Face quality too poor for matching';
+            _recognizedEmployee = null;
+          });
+        }
+        return;
+      }
+      
+      print('[TimeInOut] Face match similarity: ${similarity.toStringAsFixed(2)}% (threshold: $_matchThreshold%, tolerance: $_matchTolerance%)');
       _recentSimilarities.add(similarity);
       if (_recentSimilarities.length > 6) _recentSimilarities.removeAt(0);
     } catch (e) {
@@ -293,16 +360,13 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
           _statusMessage =
               'Face data corrupted or invalid. Please re-enroll your face in the Profile tab.';
           _recognizedEmployee = null;
-          _lastSimilarity = null;
         });
       }
       return;
     }
 
     if (mounted) {
-      // Update similarity and basic status first
       setState(() {
-        _lastSimilarity = similarity;
         // Accept match if similarity meets threshold OR is within tolerance
         // of any recent confirmed similarity (handles small temporal variance)
         final double effectiveThreshold = _matchThreshold;
@@ -326,24 +390,16 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
             suggestion =
                 '\nTry better lighting, center your face, or re-enroll.';
           }
-            _statusMessage = 'Face not matched (${similarity.toStringAsFixed(1)}%)' +
-              suggestion;
-          print('[DEBUG] Face not matched. Similarity: $similarity');
+              _statusMessage = 'Face not matched (${similarity.toStringAsFixed(1)}%)' +
+                suggestion;
         }
       });
 
-      // If very high confidence, stop detection automatically (outside setState)
-      if (similarity >= _autoStopThreshold) {
+      // If very high confidence and matched, stop detection automatically
+      if (similarity >= _autoStopThreshold && _recognizedEmployee != null) {
         try {
           await _cameraController?.stopImageStream();
         } catch (_) {}
-        if (mounted) {
-          setState(() {
-            _showSuccess = true;
-            _statusMessage =
-                '${_currentUser?.surname ?? 'User'}\nHigh confidence match: ${similarity.toStringAsFixed(1)}%';
-          });
-        }
       }
     }
   }
@@ -457,47 +513,6 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
                                       ),
                                     ),
 
-                                    // Face frame overlay that follows detected face
-                                    if (_lastFaceBoxCenterX != null &&
-                                        _lastFaceBoxWidthPct != null &&
-                                        _lastFaceBoxHeightPct != null)
-                                      Positioned(
-                                        left: (() {
-                                          // enlarge box slightly and clamp
-                                          final scale = 1.25;
-                                          final minBox = 60.0;
-                                          final rawW = _lastFaceBoxWidthPct! * previewW * scale;
-                                          final boxW = rawW < minBox ? minBox : rawW;
-                                          double left = _lastFaceBoxCenterX! * previewW - boxW / 2;
-                                          if (left < 0) left = 0;
-                                          if (left + boxW > previewW) left = previewW - boxW;
-                                          return left;
-                                        }()),
-                                        top: (() {
-                                          final scale = 1.25;
-                                          final minBox = 60.0;
-                                          final rawH = _lastFaceBoxHeightPct! * previewH * scale;
-                                          final boxH = rawH < minBox ? minBox : rawH;
-                                          double top = _lastFaceBoxCenterY! * previewH - boxH / 2;
-                                          if (top < 0) top = 0;
-                                          if (top + boxH > previewH) top = previewH - boxH;
-                                          return top;
-                                        }()),
-                                        child: Container(
-                                          width: (_lastFaceBoxWidthPct! * previewW * 1.25).clamp(60.0, previewW),
-                                          height: (_lastFaceBoxHeightPct! * previewH * 1.25).clamp(60.0, previewH),
-                                          decoration: BoxDecoration(
-                                            border: Border.all(
-                                              color: _recognizedEmployee != null
-                                                  ? Colors.green
-                                                  : Colors.white,
-                                              width: 1,
-                                            ),
-                                            borderRadius: BorderRadius.zero,
-                                          ),
-                                        ),
-                                      ),
-
                                     // Instructions overlay
                                     Positioned(
                                       top: 80,
@@ -591,24 +606,15 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
                                     textAlign: TextAlign.center,
                                   ),
                                   const SizedBox(height: 8),
-                                  if ((_recognizedEmployee != null ||
-                                          (_lastSimilarity != null &&
-                                              _lastSimilarity! >=
-                                                  (_matchThreshold -
-                                                      _matchTolerance))) &&
-                                      !_showSuccess)
+                                  if (_recognizedEmployee != null && !_showSuccess)
                                     Row(
                                       mainAxisAlignment:
                                           MainAxisAlignment.spaceEvenly,
                                       children: [
                                         ElevatedButton.icon(
                                           onPressed: () async {
-                                            // allow recording on borderline match by assigning currentUser
-                                            if (_recognizedEmployee == null &&
-                                                _lastSimilarity != null &&
-                                                _lastSimilarity! >=
-                                                    (_matchThreshold -
-                                                        _matchTolerance)) {
+                                            // Assign current user if not already set
+                                            if (_recognizedEmployee == null && _currentUser != null) {
                                               _recognizedEmployee = _currentUser;
                                               setState(() {});
                                             }
@@ -627,11 +633,7 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
                                         ),
                                         ElevatedButton.icon(
                                           onPressed: () async {
-                                            if (_recognizedEmployee == null &&
-                                                _lastSimilarity != null &&
-                                                _lastSimilarity! >=
-                                                    (_matchThreshold -
-                                                        _matchTolerance)) {
+                                            if (_recognizedEmployee == null && _currentUser != null) {
                                               _recognizedEmployee = _currentUser;
                                               setState(() {});
                                             }

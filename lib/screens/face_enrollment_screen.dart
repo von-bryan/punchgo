@@ -215,6 +215,11 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
       return;
     }
     // Only called by Confirm button now
+    if (_capturedDescriptors == null || _capturedDescriptors!.isEmpty) {
+      _showSnackBar('Face descriptors not available. Please retake.');
+      return;
+    }
+    
     setState(() {
       _isUploading = true;
       _statusMessage = 'Uploading photo...';
@@ -238,12 +243,62 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
         _showSnackBar('Photo upload failed, cannot enroll face.');
         return;
       }
-      final success = await DatabaseHelper.instance.enrollFace(
-        empId: widget.employee.empId,
-        photoPath: photoPath,
-        faceDescriptors: _capturedDescriptors!,
+      
+      // Use new multi-sample enrollment system
+      print('[Enroll] Starting enrollment session...');
+      int? enrollmentId = await DatabaseHelper.instance.startFaceEnrollmentSession(
+        widget.employee.empId,
       );
-      if (success) {
+      
+      if (enrollmentId == null) {
+        print('[ERROR] enrollmentId is null');
+        setState(() {
+          _isUploading = false;
+        });
+        _showSnackBar('Failed to start enrollment session.');
+        return;
+      }
+      
+      print('[Enroll] Enrollment ID: $enrollmentId, saving sample...');
+      // Save as first sample with quality assessment
+      final quality = 85.0; // Default quality for now
+      final saved = await DatabaseHelper.instance.saveFaceSample(
+        enrollmentId: enrollmentId,
+        empId: widget.employee.empId,
+        faceDescriptors: _capturedDescriptors!,
+        photoPath: photoPath,
+        qualityScore: quality,
+        lightingQuality: 90,
+        angleQuality: 95,
+        faceSizeQuality: 80,
+        sharpnessQuality: 85,
+        sampleAngle: 'frontal',
+      );
+      
+      if (!saved) {
+        print('[ERROR] saveFaceSample returned false');
+        setState(() {
+          _isUploading = false;
+        });
+        _showSnackBar('Failed to save face sample.');
+        return;
+      }
+      
+      print('[Enroll] Sample saved, completing enrollment...');
+      // Mark enrollment as complete
+      final completed = await DatabaseHelper.instance.completeEnrollment(enrollmentId);
+      
+      if (!completed) {
+        print('[ERROR] completeEnrollment returned false');
+        setState(() {
+          _isUploading = false;
+        });
+        _showSnackBar('Failed to complete enrollment.');
+        return;
+      }
+      
+      print('✅ Face enrollment completed successfully');
+      if (mounted) {
         setState(() {
           _enrollSuccess = true;
           _isUploading = false;
@@ -258,13 +313,8 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
             (route) => false,
           );
         }
-      } else {
-        setState(() {
-          _isUploading = false;
-        });
-        _showSnackBar('Failed to save face enrollment. Please try again.');
       }
-    } catch (e, stackTrace) {
+    } catch (e) {
       setState(() {
         _isUploading = false;
       });

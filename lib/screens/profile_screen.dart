@@ -185,7 +185,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _enrollFace() async {
     if (_employee == null) return;
 
-    final result = await Navigator.of(context).push(
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => FaceEnrollmentScreen(employee: _employee!),
       ),

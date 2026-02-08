@@ -199,6 +199,55 @@ class DatabaseHelper {
         }
       } else {
         print('✅ face_enrollments table already exists');
+        // Add new columns if they don't exist (for phone-like system)
+        try {
+          await conn.query('ALTER TABLE face_enrollments ADD COLUMN avg_quality_score FLOAT DEFAULT 0');
+        } catch (_) {}
+        try {
+          await conn.query('ALTER TABLE face_enrollments ADD COLUMN sample_count INT DEFAULT 0');
+        } catch (_) {}
+        try {
+          await conn.query('ALTER TABLE face_enrollments ADD COLUMN is_complete BOOLEAN DEFAULT FALSE');
+        } catch (_) {}
+        try {
+          await conn.query('ALTER TABLE face_enrollments ADD COLUMN completed_at DATETIME');
+        } catch (_) {}
+      }
+
+      // Check if face_samples table exists
+      result = await conn.query(
+        "SHOW TABLES LIKE 'face_samples'",
+      );
+      
+      if (result.isEmpty) {
+        print('Creating face_samples table...');
+        try {
+          await conn.query('''
+            CREATE TABLE face_samples (
+              sample_id INT AUTO_INCREMENT PRIMARY KEY,
+              enrollment_id INT NOT NULL,
+              emp_id INT NOT NULL,
+              face_descriptors TEXT NOT NULL,
+              photo_path VARCHAR(255),
+              quality_score FLOAT DEFAULT 0,
+              lighting_quality FLOAT DEFAULT 0,
+              angle_quality FLOAT DEFAULT 0,
+              face_size_quality FLOAT DEFAULT 0,
+              sharpness_quality FLOAT DEFAULT 0,
+              sample_angle VARCHAR(50),
+              sampled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              INDEX idx_enrollment_id (enrollment_id),
+              INDEX idx_emp_id (emp_id),
+              FOREIGN KEY (enrollment_id) REFERENCES face_enrollments(face_id) ON DELETE CASCADE,
+              FOREIGN KEY (emp_id) REFERENCES info(emp_id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+          ''');
+          print('✅ face_samples table created');
+        } catch (faceError) {
+          print('❌ Error creating face_samples table: $faceError');
+        }
+      } else {
+        print('✅ face_samples table already exists');
       }
     } catch (e) {
       print('Note: Tables may already exist: $e');
@@ -209,7 +258,7 @@ class DatabaseHelper {
   Future<Employee> createEmployee(Employee employee) async {
     final conn = await instance.connection;
     
-    var result = await conn.query(
+    await conn.query(
       '''INSERT INTO info (
         emp_id, isAgency, alias, surname, first_name, middle_name,
         qualifier, salutation, sex, birth_date, birth_place, marital_status,
@@ -759,6 +808,173 @@ class DatabaseHelper {
     } catch (e) {
       print('Error getting face enrollment history: $e');
       return [];
+    }
+  }
+
+  // ========== PHONE-LIKE FACE RECOGNITION SYSTEM ==========
+
+  /// Start a new face enrollment session (marks old ones as inactive)
+  Future<int?> startFaceEnrollmentSession(int empId) async {
+    try {
+      final conn = await instance.connection;
+      
+      // Deactivate old enrollments
+      await conn.query(
+        'UPDATE face_enrollments SET is_active = FALSE WHERE emp_id = ? AND is_active = TRUE',
+        [empId],
+      );
+      
+      // Create new enrollment session
+      var result = await conn.query(
+        'INSERT INTO face_enrollments (emp_id, is_active, is_complete) VALUES (?, TRUE, FALSE)',
+        [empId],
+      );
+      
+      final enrollmentId = result.insertId;
+      print('✅ Enrollment session started: emp_id=$empId, face_id=$enrollmentId');
+      return enrollmentId;
+    } catch (e) {
+      print('❌ Error starting enrollment session: $e');
+      return null;
+    }
+  }
+
+  /// Save a face sample with quality metrics
+  Future<bool> saveFaceSample({
+    required int enrollmentId,
+    required int empId,
+    required String faceDescriptors,
+    required String photoPath,
+    required double qualityScore,
+    required double lightingQuality,
+    required double angleQuality,
+    required double faceSizeQuality,
+    required double sharpnessQuality,
+    String sampleAngle = 'frontal',
+  }) async {
+    try {
+      final conn = await instance.connection;
+      
+      await conn.query(
+        '''INSERT INTO face_samples 
+           (enrollment_id, emp_id, face_descriptors, photo_path, quality_score, 
+            lighting_quality, angle_quality, face_size_quality, sharpness_quality, sample_angle) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        [enrollmentId, empId, faceDescriptors, photoPath, qualityScore,
+         lightingQuality, angleQuality, faceSizeQuality, sharpnessQuality, sampleAngle],
+      );
+      
+      print('✅ Face sample saved');
+      return true;
+    } catch (e) {
+      print('❌ Error saving face sample: $e');
+      return false;
+    }
+  }
+
+  /// Complete enrollment and calculate average quality
+  Future<bool> completeEnrollment(int enrollmentId) async {
+    try {
+      final conn = await instance.connection;
+      
+      // Get all samples for this enrollment
+      var samples = await conn.query(
+        'SELECT quality_score FROM face_samples WHERE enrollment_id = ?',
+        [enrollmentId],
+      );
+      
+      if (samples.isEmpty) {
+        print('No samples found for enrollment');
+        return false;
+      }
+      
+      // Calculate average quality
+      double totalQuality = 0;
+      for (var sample in samples) {
+        totalQuality += (sample['quality_score'] as num).toDouble();
+      }
+      double avgQuality = totalQuality / samples.length;
+      
+      // Mark enrollment as complete
+      await conn.query(
+        'UPDATE face_enrollments SET is_complete = TRUE, completed_at = NOW(), avg_quality_score = ?, sample_count = ? WHERE face_id = ?',
+        [avgQuality, samples.length, enrollmentId],
+      );
+      
+      print('✅ Enrollment completed with ${samples.length} samples, avg quality: ${avgQuality.toStringAsFixed(2)}');
+      return true;
+    } catch (e) {
+      print('❌ Error completing enrollment: $e');
+      return false;
+    }
+  }
+
+  /// Get all samples for an enrollment (for matching)
+  Future<List<Map<String, dynamic>>> getEnrollmentSamples(int enrollmentId) async {
+    try {
+      final conn = await instance.connection;
+      
+      var result = await conn.query(
+        'SELECT * FROM face_samples WHERE enrollment_id = ? ORDER BY quality_score DESC',
+        [enrollmentId],
+      );
+      
+      return result.map((row) => _rowToMap(row)).toList();
+    } catch (e) {
+      print('[ERROR] getEnrollmentSamples: $e');
+      return [];
+    }
+  }
+
+  /// Get all samples for an employee (across all enrollments)
+  Future<List<Map<String, dynamic>>> getEmployeeFaceSamples(int empId) async {
+    try {
+      final conn = await instance.connection;
+      
+      var result = await conn.query(
+        '''SELECT fs.* FROM face_samples fs
+           JOIN face_enrollments fe ON fs.enrollment_id = fe.face_id
+           WHERE fs.emp_id = ? AND fe.is_active = TRUE
+           ORDER BY fs.quality_score DESC''',
+        [empId],
+      );
+      
+      return result.map((row) => _rowToMap(row)).toList();
+    } catch (e) {
+      print('Error getting employee face samples: $e');
+      return [];
+    }
+  }
+
+  /// Get active enrollment for employee (works with old and new enrollments)
+  Future<Map<String, dynamic>?> getActiveEnrollment(int empId) async {
+    try {
+      final conn = await instance.connection;
+      
+      // Try to get completed enrollment first (new system)
+      var result = await conn.query(
+        'SELECT * FROM face_enrollments WHERE emp_id = ? AND is_active = TRUE AND is_complete = TRUE ORDER BY completed_at DESC LIMIT 1',
+        [empId],
+      );
+      
+      if (result.isNotEmpty) {
+        return _rowToMap(result.first);
+      }
+      
+      // Fallback to any active enrollment (old system)
+      result = await conn.query(
+        'SELECT * FROM face_enrollments WHERE emp_id = ? AND is_active = TRUE ORDER BY enrolled_at DESC LIMIT 1',
+        [empId],
+      );
+      
+      if (result.isNotEmpty) {
+        return _rowToMap(result.first);
+      }
+      
+      return null;
+    } catch (e) {
+      print('[ERROR] getActiveEnrollment: $e');
+      return null;
     }
   }
 }
