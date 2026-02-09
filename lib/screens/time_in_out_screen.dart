@@ -25,18 +25,12 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
   bool _showSuccess = false;
   bool _isConfirmed = false;
   Employee? _currentUser;
-  // Debug info
   Size? _lastFaceBoxSize;
-  // Relative face box position (percent of image) and size
-  double? _lastFaceBoxCenterX;
-  double? _lastFaceBoxCenterY;
-  double? _lastFaceBoxWidthPct;
-  double? _lastFaceBoxHeightPct;
   bool _isMatching = false; // New variable to track matching state
   // Matching parameters
-  final double _matchThreshold = 85.0; // primary acceptance threshold - VERY STRICT (phone-like)
-  final double _matchTolerance = 5.0; // accept within +/- this value
-  final double _autoStopThreshold = 90.0; // auto-stop detection at this confidence
+  final double _matchThreshold = 80.0; // primary acceptance threshold - accepts your face (81%) but rejects others (64%)
+  final double _matchTolerance = 3.0; // accept within +/- this value
+  final double _autoStopThreshold = 85.0; // auto-stop detection at this confidence
   // Recent similarity history to allow small temporal variance matching
   final List<double> _recentSimilarities = [];
 
@@ -246,19 +240,8 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
           final face = faces.first;
           print('[TimeInOut] face bbox: ${face.boundingBox.width}x${face.boundingBox.height}');
           final faceBox = face.boundingBox;
-          // compute relative positions based on the camera image dimensions
-          final imgW = image.width.toDouble();
-          final imgH = image.height.toDouble();
-          final centerX = (faceBox.center.dx) / imgW;
-          final centerY = (faceBox.center.dy) / imgH;
-          final widthPct = faceBox.width / imgW;
-          final heightPct = faceBox.height / imgH;
           setState(() {
             _lastFaceBoxSize = Size(faceBox.width, faceBox.height);
-            _lastFaceBoxCenterX = centerX;
-            _lastFaceBoxCenterY = centerY;
-            _lastFaceBoxWidthPct = widthPct;
-            _lastFaceBoxHeightPct = heightPct;
           });
           final descriptors = _faceService.extractFaceDescriptors(face);
           print('[TimeInOut] extracted descriptors: ${descriptors?.toString() ?? 'null'}');

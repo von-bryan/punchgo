@@ -148,7 +148,7 @@ class FaceRecognitionService {
     return null;
   }
 
-  // Compare two face descriptors with STRICT matching
+  // Compare two face descriptors with EXTREMELY STRICT matching
   double compareFaces(String? descriptors1, String? descriptors2) {
     if (descriptors1 == null || descriptors2 == null || descriptors1.isEmpty || descriptors2.isEmpty) {
       return 0.0;
@@ -162,34 +162,42 @@ class FaceRecognitionService {
         return 0.0;
       }
 
-      // STRICT APPROACH: Use equal weights, penalize differences heavily
+      // EXTREMELY STRICT: Penalize ANY difference heavily
       final int n = desc1.length;
       
-      double sum = 0.0;
-      double maxDiff = 0.0;
-      int largeDeviations = 0;
+      double totalAbsDiff = 0.0;
+      int deviationCount = 0;
       
       for (int i = 0; i < n; i++) {
-        final double d = desc1[i] - desc2[i];
-        sum += d * d;
-        final double absDiff = d.abs();
-        if (absDiff > maxDiff) maxDiff = absDiff;
-        if (absDiff > 0.4) largeDeviations++; // Count large differences
+        final double absDiff = (desc1[i] - desc2[i]).abs();
+        totalAbsDiff += absDiff;
+        if (absDiff > 0.2) deviationCount++; // Even small deviations count
       }
       
-      double distance = sqrt(sum);
+      // Average difference per feature
+      double avgDiff = totalAbsDiff / n;
       
-      // MUCH stricter: higher multiplier means high distance = very low similarity
-      double rawSimilarity = max(0, 100 - (distance * 20)); // Increased from 8 to 20
+      // MASSIVE penalties for any deviations
+      // Perfect match = 0 avg diff, penalties rise steeply
+      double similarity;
+      if (avgDiff < 0.05) {
+        similarity = 95.0; // Nearly identical
+      } else if (avgDiff < 0.1) {
+        similarity = 85.0; // Very close
+      } else if (avgDiff < 0.15) {
+        similarity = 70.0; // Somewhat similar
+      } else if (avgDiff < 0.2) {
+        similarity = 50.0; // Weak similarity
+      } else if (avgDiff < 0.3) {
+        similarity = 30.0; // Poor similarity
+      } else {
+        similarity = 10.0; // Very different
+      }
       
-      // STRICT penalties for deviations
-      double penalty = 0.0;
-      penalty += largeDeviations * 5.0; // Heavy penalty for each large deviation
-      if (maxDiff > 0.8) penalty += 15.0; // Extra penalty if any diff is very large
+      // Additional penalty for multiple deviations
+      similarity -= (deviationCount * 2.0);
       
-      double similarity = (rawSimilarity - penalty).clamp(0, 100);
-      
-      return similarity.toDouble();
+      return similarity.clamp(0, 100).toDouble();
     } catch (e) {
       print('Error comparing faces: $e');
       return 0.0;
@@ -262,7 +270,7 @@ class FaceRecognitionService {
     );
   }
 
-  /// Compare against multiple samples (phone-like matching) - STRICT
+  /// Compare against multiple samples (phone-like matching) - EXTREMELY STRICT
   double compareAgainstMultipleSamples(String currentDescriptors, List<String> enrolledDescriptorsList) {
     if (enrolledDescriptorsList.isEmpty) return 0.0;
     
@@ -275,17 +283,9 @@ class FaceRecognitionService {
       }
     }
     
-    // Only boost if we have multiple VERY GOOD matches (80%+)
-    int veryGoodMatches = enrolledDescriptorsList.fold<int>(
-      0,
-      (count, enrolled) => compareFaces(currentDescriptors, enrolled) > 80 ? count + 1 : count,
-    );
-    
-    // Minimal bonus - only if multiple samples match
-    double bonus = veryGoodMatches > 1 ? 5.0 : 0.0; // Only 5% bonus for multiple matches
-    double finalScore = (bestSimilarity + bonus).clamp(0, 100);
-    
-    return finalScore;
+    // No bonus - just use best match score directly
+    // Each sample must stand on its own merit
+    return bestSimilarity.clamp(0, 100);
   }
 
   InputImageRotation _rotationToInputImageRotation(int rotation) {
