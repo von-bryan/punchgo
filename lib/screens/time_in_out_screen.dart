@@ -26,12 +26,10 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
   bool _isConfirmed = false;
   Employee? _currentUser;
   Size? _lastFaceBoxSize;
-  bool _isMatching = false; // New variable to track matching state
-  // Matching parameters
-  final double _matchThreshold = 80.0; // primary acceptance threshold - accepts your face (81%) but rejects others (64%)
-  final double _matchTolerance = 3.0; // accept within +/- this value
-  final double _autoStopThreshold = 85.0; // auto-stop detection at this confidence
-  // Recent similarity history to allow small temporal variance matching
+  // Matching parameters - STRICT FOR SECURITY
+  final double _matchThreshold = 84.0; // primary acceptance threshold - STRICT: rejects similar faces
+  final double _autoStopThreshold = 90.0; // auto-stop detection at this very high confidence
+  // Track recent similarities for debugging/logging only (NOT used for matching decision)
   final List<double> _recentSimilarities = [];
 
   @override
@@ -89,11 +87,14 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
           }
 
           if (descriptorsList.isNotEmpty) {
+            final joinedDesc = descriptorsList.join('|');
+            print('[TimeInOut] ✅ Loaded ${descriptorsList.length} face samples');
+            print('[TimeInOut] Sample 1 (first 50 chars): ${descriptorsList[0].length > 50 ? descriptorsList[0].substring(0, 50) : descriptorsList[0]}...');
             _currentUser = Employee(
               empId: empId,
               surname: '',
               firstName: '',
-              faceDescriptors: descriptorsList.join('|'),
+              faceDescriptors: joinedDesc,
             );
             print('✅ Loaded ${descriptorsList.length} face samples for matching');
             return;
@@ -220,13 +221,11 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
           _recognizedEmployee != null) return;
 
       _isProcessing = true;
-      _isMatching = true;
 
       await _loadCurrentUser();
 
       if (_currentUser == null) {
         _isProcessing = false;
-        _isMatching = false;
         return;
       }
 
@@ -278,7 +277,6 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
       }
 
       _isProcessing = false;
-      _isMatching = false;
     });
   }
 
@@ -311,11 +309,14 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
         .where((s) => s.isNotEmpty)
         .toList();
 
+      print('[TimeInOut] Comparing against ${enrolledSamples.length} enrolled sample(s)');
+
       if (enrolledSamples.isEmpty) {
         // Fallback for single sample
         similarity = _faceService.compareFaces(descriptors, enrolledDescStr);
       } else if (enrolledSamples.length == 1) {
         // Single sample - normal comparison
+        print('[TimeInOut] Using single sample (first 50 chars): ${enrolledSamples[0].length > 50 ? enrolledSamples[0].substring(0, 50) : enrolledSamples[0]}...');
         similarity = _faceService.compareFaces(descriptors, enrolledSamples[0]);
       } else {
         // Multiple samples - use best match + bonus
@@ -333,9 +334,17 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
         return;
       }
       
-      print('[TimeInOut] Face match similarity: ${similarity.toStringAsFixed(2)}% (threshold: $_matchThreshold%, tolerance: $_matchTolerance%)');
-      _recentSimilarities.add(similarity);
-      if (_recentSimilarities.length > 6) _recentSimilarities.removeAt(0);
+      print('[TimeInOut] 🔍 DETAILED MATCH: ${similarity.toStringAsFixed(2)}% (threshold: $_matchThreshold%)\nEnrolled samples: ${enrolledSamples.length}, Current face avg quality: ${(_lastFaceBoxSize?.width ?? 0).toStringAsFixed(0)}px');
+      
+      // STRICT: Only accept if WELL above threshold - clear history if not matched
+      if (similarity < _matchThreshold) {
+        _recentSimilarities.clear();
+        print('[❌ REJECTED] ${similarity.toStringAsFixed(1)}% < $_matchThreshold% threshold');
+      } else {
+        print('[✅ ACCEPTED] ${similarity.toStringAsFixed(1)}% >= $_matchThreshold% threshold - MATCH FOUND!');
+        _recentSimilarities.add(similarity);
+        if (_recentSimilarities.length > 6) _recentSimilarities.removeAt(0);
+      }
     } catch (e) {
       print('[ERROR] _matchFace exception: $e');
       if (mounted) {
@@ -350,12 +359,9 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
 
     if (mounted) {
       setState(() {
-        // Accept match if similarity meets threshold OR is within tolerance
-        // of any recent confirmed similarity (handles small temporal variance)
-        final double effectiveThreshold = _matchThreshold;
-        final bool matched = (similarity >= effectiveThreshold) ||
-          _recentSimilarities.any((s) =>
-            s >= effectiveThreshold && (s - similarity).abs() <= _matchTolerance);
+        // STRICT: Only accept if current similarity meets threshold
+        // Do NOT use temporal variance - each face must be independently verified
+        final bool matched = similarity >= _matchThreshold;
 
         if (matched) {
           _recognizedEmployee = _currentUser;
@@ -495,61 +501,12 @@ class _TimeInOutScreenState extends State<TimeInOutScreen> {
                                         ),
                                       ),
                                     ),
-
-                                    // Instructions overlay
-                                    Positioned(
-                                      top: 80,
-                                      left: 20,
-                                      right: 20,
-                                      child: Container(
-                                        padding: const EdgeInsets.all(12),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black.withOpacity(0.6),
-                                          borderRadius: BorderRadius.circular(10),
-                                        ),
-                                        child: Column(
-                                          children: [
-                                            Icon(
-                                              _recognizedEmployee != null
-                                                  ? Icons.check_circle
-                                                  : Icons.face,
-                                              color: Colors.white,
-                                            ),
-                                            const SizedBox(height: 6),
-                                            Text(
-                                              _statusMessage,
-                                              style: const TextStyle(color: Colors.white),
-                                              textAlign: TextAlign.center,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
                                   ],
                                 ),
                               ),
                             ),
                           ),
-                                          // (removed on-screen debug info)
-                          // Show matching progress if running and not matched
-                          if (_isMatching && _recognizedEmployee == null)
-                            Padding(
-                              padding:
-                                  const EdgeInsets.only(top: 8.0, bottom: 4.0),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: const [
-                                  SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2),
-                                  ),
-                                  SizedBox(width: 10),
-                                  Text('Detecting face...')
-                                ],
-                              ),
-                            ),
+                                          // Removed on-camera displays per user request
                           Container(
                             width: double.infinity,
                             constraints: BoxConstraints(

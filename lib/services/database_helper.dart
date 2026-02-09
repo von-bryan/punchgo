@@ -855,6 +855,8 @@ class DatabaseHelper {
     try {
       final conn = await instance.connection;
       
+      print('[DB] Saving sample - enrollment_id: $enrollmentId, descriptors (first 50): ${faceDescriptors.substring(0, 50)}..., quality: $qualityScore');
+      
       await conn.query(
         '''INSERT INTO face_samples 
            (enrollment_id, emp_id, face_descriptors, photo_path, quality_score, 
@@ -864,7 +866,7 @@ class DatabaseHelper {
          lightingQuality, angleQuality, faceSizeQuality, sharpnessQuality, sampleAngle],
       );
       
-      print('✅ Face sample saved');
+      print('✅ Face sample saved to enrollment_id: $enrollmentId');
       return true;
     } catch (e) {
       print('❌ Error saving face sample: $e');
@@ -919,7 +921,9 @@ class DatabaseHelper {
         [enrollmentId],
       );
       
-      return result.map((row) => _rowToMap(row)).toList();
+      final mappedResult = result.map((row) => _rowToMap(row)).toList();
+      print('[DB] getEnrollmentSamples(enrollmentId: $enrollmentId) returned ${mappedResult.length} samples');
+      return mappedResult;
     } catch (e) {
       print('[ERROR] getEnrollmentSamples: $e');
       return [];

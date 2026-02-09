@@ -262,6 +262,7 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
       print('[Enroll] Enrollment ID: $enrollmentId, saving sample...');
       // Save as first sample with quality assessment
       final quality = 85.0; // Default quality for now
+      print('[Enroll] Descriptors to save: ${_capturedDescriptors!.substring(0, 50)}... (length: ${_capturedDescriptors!.length})');
       final saved = await DatabaseHelper.instance.saveFaceSample(
         enrollmentId: enrollmentId,
         empId: widget.employee.empId,

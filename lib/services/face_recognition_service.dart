@@ -177,25 +177,42 @@ class FaceRecognitionService {
       // Average difference per feature
       double avgDiff = totalAbsDiff / n;
       
-      // MASSIVE penalties for any deviations
-      // Perfect match = 0 avg diff, penalties rise steeply
+      // EXTREMELY STRICT tiers - different faces should not score high
+      // Perfect match = avgDiff ~0.02-0.04, other faces = avgDiff ~0.12-0.18
       double similarity;
-      if (avgDiff < 0.05) {
-        similarity = 95.0; // Nearly identical
+      if (avgDiff < 0.04) {
+        similarity = 98.0; // Nearly identical (enrolled face)
+      } else if (avgDiff < 0.06) {
+        similarity = 90.0; // Very close (same person, different angle)
+      } else if (avgDiff < 0.08) {
+        similarity = 82.0; // Close but some variance
       } else if (avgDiff < 0.1) {
-        similarity = 85.0; // Very close
+        similarity = 72.0; // Moderate similarity
+      } else if (avgDiff < 0.12) {
+        similarity = 60.0; // Getting different
       } else if (avgDiff < 0.15) {
-        similarity = 70.0; // Somewhat similar
+        similarity = 45.0; // Different face
       } else if (avgDiff < 0.2) {
-        similarity = 50.0; // Weak similarity
-      } else if (avgDiff < 0.3) {
-        similarity = 30.0; // Poor similarity
+        similarity = 30.0; // Very different
       } else {
-        similarity = 10.0; // Very different
+        similarity = 10.0; // Completely different
       }
       
-      // Additional penalty for multiple deviations
-      similarity -= (deviationCount * 2.0);
+      // Heavy penalty for multiple deviations >0.2 (suspicious differences)
+      similarity -= (deviationCount * 3.0);
+      
+      // 🚨 DEBUG: Show detailed comparison
+      print('[COMPARE] avgDiff: ${avgDiff.toStringAsFixed(4)}, deviations>0.2: $deviationCount, similarity: ${similarity.toStringAsFixed(1)}%');
+      if (avgDiff > 0.08) {
+        // For suspicious matches, show feature-by-feature breakdown
+        print('[COMPARE] Feature breakdown (enrolled vs current):');
+        for (int i = 0; i < n; i++) {
+          final double diff = (desc1[i] - desc2[i]).abs();
+          if (diff > 0.08) {
+            print('  Feature $i: enrolled=${desc1[i].toStringAsFixed(3)}, current=${desc2[i].toStringAsFixed(3)}, diff=${diff.toStringAsFixed(3)} ⚠️');
+          }
+        }
+      }
       
       return similarity.clamp(0, 100).toDouble();
     } catch (e) {
